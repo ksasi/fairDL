@@ -21,19 +21,16 @@ parser = argparse.ArgumentParser(description='Pytorch framework for training and
 parser.add_argument("--source_path", default="", type=str, help='Root path of the source images(default is None)')
 parser.add_argument("--target_path", default="", type=str, help='Root path to save target images(default is None)')
 parser.add_argument("--size", default=128, type=int, help='Target resolution with which the processed images is saved(default value is 128)')
-parser.add_argument("--num", default=2000, type=int, help='Number of images to be processed(default value is 2000)')
 
 
-def facedetect(src, tgt, size, dcount):
+def facedetect(src, tgt, size):
     device = torch.device('cuda')
-    for dir_num in range(dcount):
-        for img_num in range(1,5,1):
-            src_img = f'{src}/id_{dir_num}/{dir_num}_{img_num}.png'
-            tgt_img = f'{tgt}/id_{dir_num}/{dir_num}_{img_num}.png'
-            os.makedirs(f'{tgt}/id_{dir_num}', exist_ok=True)
+    for dirname in os.listdir(src):
+        for file in os.listdir(f'{src}/{dirname}'):
+            src_img = f'{src}/{dirname}/{file}'
+            tgt_img = f'{tgt}/{dirname}/{file}'
+            os.makedirs(f'{tgt}/{dirname}', exist_ok=True)
             face_detection = FaceDetector().to(device, torch.float32)
-            #print(src_img)
-            #print(f'{tgt}/id_{dir_num}')
             img_bgr = cv2.imread(src_img)
             img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
             img = K.utils.image_to_tensor(np.asarray(img)).to(device, torch.float32)
@@ -49,21 +46,19 @@ def facedetect(src, tgt, size, dcount):
                 print("Exception: Face Not Detected")
                 roi = img.clone()
             if roi.squeeze(0).shape[1] == 0 or roi.squeeze(0).shape[2] == 0:
-                img = K.geometry.transform.resize(img, (size, size))
-                img_np = K.utils.tensor_to_image(img)
+                img_npb = K.utils.tensor_to_image(img)
+                img_np = cv2.GaussianBlur(img_npb,(3,3),0)
                 Image.fromarray(img_np.astype('uint8'), 'RGB').save(tgt_img)
             else:
-                roi = K.geometry.transform.resize(roi, (size, size))
                 img_np = K.utils.tensor_to_image(roi)
                 Image.fromarray(img_np.astype('uint8'), 'RGB').save(tgt_img)
+
 
 def main():
     global args
     args = parser.parse_args()
-    facedetect(args.source_path, args.target_path, args.size, args.num)
+    facedetect(args.source_path, args.target_path, args.size)
 
 
 if __name__ == '__main__':
     main()
-
-#python /workspace/fairDL/src/preprocess.py --source_path="/workspace/fairDL/data/synthface" --target_path="/workspace/fairDL/data/synthface_processed" --size=128 --num=2000

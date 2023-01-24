@@ -8,6 +8,7 @@ import torchvision.transforms as transforms
 import torch.optim
 import torch.utils.data
 from torch.optim.lr_scheduler import StepLR
+import torch.nn.functional as F
 
 import numpy as np
 from model import LightCNN_9Layers, LightCNN_29Layers, LightCNN_29Layers_v2, SiameseModel, TripletModel, Resnet50_scratch_dag
@@ -35,43 +36,31 @@ parser.add_argument("--train_list", default="", type=str, help='path to training
 
 
 
-def train_epoch(model, train_loader, criterion, optimizer, lr_scheduler, device):
+def train_epoch(model, train_loader, criterion, optimizer, criterion_optimizer, lr_scheduler, device):
     train_epoch_losses = MetricLog()
-    #top1_train_epoch_acc = MetricLog()
-    #top5_train_epoch_acc = MetricLog()
-    #model.train()
     for idx, data in enumerate(train_loader):
         inputs, labels = data
         inputs = inputs.to(device, non_blocking = True)
         labels = labels.to(device, non_blocking = True)
         model = model.to(device)
         optimizer.zero_grad()
+        criterion_optimizer.zero_grad()
         preds_tuple = model(inputs)
-        #preds = preds_tuple[0]
-        #loss = criterion(preds, labels)
-        #print(preds_tuple[1].shape)
-        loss = criterion(preds_tuple[1], labels)
-
-        #acc1, acc5 = accuracyk(preds, labels, topk=(1,5))
+        criterion = criterion.to(device, non_blocking = True)
+        loss_criterion = criterion(preds_tuple[1], labels)
+        loss = loss_criterion
         train_epoch_losses.update(loss.item())
-        #top1_train_epoch_acc.update(acc1.item())
-        #top5_train_epoch_acc.update(acc5.item())
-
         loss.backward()
         optimizer.step()
+        criterion_optimizer.step()
     print('\nTraining set: Average loss: {}\n'.format(train_epoch_losses.avg), flush=True)
     return train_epoch_losses.avg
-    #print('\nTraining set: Average loss: {}, Accuracy: ({})\n'.format(train_epoch_losses.avg, top1_train_epoch_acc.avg))
-    #return train_epoch_losses.avg, top1_train_epoch_acc.avg, top5_train_epoch_acc.avg
 
 
 
 
 def val_epoch(model, val_loader, criterion, optimizer, device):
     val_losses = MetricLog()
-    #top1_val_acc = MetricLog()
-    #top5_val_acc = MetricLog()
-
     model.eval()
     with torch.no_grad():
         for idx, data in enumerate(val_loader):
@@ -80,29 +69,19 @@ def val_epoch(model, val_loader, criterion, optimizer, device):
             labels = labels.to(device, non_blocking=True)
             model = model.to(device)
             preds_tuple = model(inputs)
-            #preds = preds_tuple[0]
-            #loss = criterion(preds, labels)
-            loss = criterion(preds_tuple[1], labels)
-            #acc1, acc5 = accuracyk(preds, labels, topk=(1,5))
+            loss_criterion = criterion(preds_tuple[1], labels)
+            loss = loss_criterion
             val_losses.update(loss.item())
-            #top1_val_acc.update(acc1.item())
-            #top5_val_acc.update(acc5.item())
     print('\nValidation set: Average loss: {}\n'.format(val_losses.avg), flush=True)
     return val_losses.avg
-    #print('\nValidation set: Average loss: {}, Accuracy: ({})\n'.format(val_losses.avg, top1_val_acc.avg))
-    #return val_losses.avg, top1_val_acc.avg
 
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, lr_scheduler, epochs, save_path, arch):
+def train_model(model, train_loader, val_loader, criterion, optimizer, criterion_optimizer, lr_scheduler, epochs, save_path, arch):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    #train_losses = MetricLog()
-    #top1_train_acc = MetricLog()
-    #top5_train_acc = MetricLog()
     for epoch in range(epochs):
         lr_scheduler.step()
         print('Epoch:', epoch,'LR:', lr_scheduler.get_lr())
-        train_epoch(model, train_loader, criterion, optimizer, lr_scheduler, device)
-        #val_acc1, _ = val_epoch(model, val_loader, criterion, optimizer, device)
+        train_epoch(model, train_loader, criterion, optimizer, criterion_optimizer, lr_scheduler, device)
         val_loss = val_epoch(model, val_loader, criterion, optimizer, device)
         save_name = save_path + 'model_' + str(epoch+1) + '_checkpoint.pth.tar'
         save_checkpoint({
@@ -149,19 +128,6 @@ def main():
         train_transforms = transforms.Compose([transforms.CenterCrop(512), transforms.Resize(256), transforms.RandomCrop(224), transform.RdomGrayscale(p=0.2), transforms.RandomHorizontalFlip(), transforms.ToTensor(), transforms.Normalize((131.0912/255, 103.8827/255, 91.4953/255), (1/255, 1/255, 1/255))])
         val_transforms = transforms.Compose([transforms.CenterCrop(512), transforms.Resize(256), transforms.CenterCrop(224), transforms.RandomHorizontalFlip(), transforms.ToTensor(), transforms.Normalize((131.0912/255, 103.8827/255, 91.4953/255), (1/255, 1/255, 1/255))])
         report_cmc_path = '/workspace/fairDL/reports/figures/cmc_vgg_plot.pdf'
-
-    dataset = torchvision.datasets.ImageFolder('/workspace/fairDL/data/bfw/Users/jrobby/bfw/bfw-cropped-aligned', transform=train_transforms)
-    train_dataset, val_dataset = train_val_split(dataset, val_size = 0.3)
-
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=0, pin_memory=True)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, num_workers=0, pin_memory=True)
-
-    #criterion = OnlineContrastiveloss(margin = 2, pairselector=pairselector())
-    criterion = losses.ContrastiveLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr = args.learning_rate, weight_decay=args.weight_decay, momentum=args.momentum)
-    lr_scheduler = StepLR(optimizer, step_size=20, gamma=0.1)
-
-    train_model(model, train_loader, val_loader, criterion, optimizer, lr_scheduler, args.epochs, args.save_path, args.arch)
 
 if __name__ == '__main__':
     main()

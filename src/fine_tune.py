@@ -14,11 +14,24 @@ from utils import generate_embeddings, generate_embeddings_v2, cosine_similarity
 
 from pytorch_metric_learning import losses, miners, distances, reducers, testers
 
+import numbers
+import os
+import queue as Queue
+import threading
+from typing import Iterable
+
+import numpy as np
+import torch
+from torch import distributed
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+from torchvision.datasets import ImageFolder
+
 
 parser = argparse.ArgumentParser(description='Pytorch framework for training and fine-tuning models for face recognition')
 
 parser.add_argument("--model", default="LightCNN_29", help='model architecture (default is LightCNN_29)')
-parser.add_argument("--dataset", default="LFW", type=str, help='Dataset to be used for training(default is LFW)')
+parser.add_argument("--dataset", default="CMU", type=str, help='Dataset to be used for training(default is LFW)')
 parser.add_argument("--epochs", default=50, type=int, help='epochs for training (default value is 50)')
 parser.add_argument("--batch_size", default=128, type=int, help='mini-batch size for training (default value is 128)')
 parser.add_argument("--learning_rate", default=0.01, type=float, help='initial learning rate for training (default value is 0.01)')
@@ -31,6 +44,7 @@ parser.add_argument("--val_list", default="", type=str, help='path to validation
 parser.add_argument("--train_list", default="", type=str, help='path to training list(default is None)')
 
 
+
 def set_parameter_requires_grad(model, feature_extracting, num_layers):
     if feature_extracting:
         num = 0
@@ -41,9 +55,23 @@ def set_parameter_requires_grad(model, feature_extracting, num_layers):
             else:
                param.requires_grad = False
 
+def set_parameter_requires_grad_no_head(model, feature_extracting, num_layers):
+    if feature_extracting:
+        num = 0
+        for param in model.parameters():
+            num = num + 1
+            if num < len(list(model.parameters())) - num_layers:
+               param.requires_grad = True
+            else:
+               param.requires_grad = False
+
 def unfreeze_all(model):
     for param in model.parameters():
         param.requires_grad = True
+
+def freeze_all(model):
+    for param in model.parameters():
+        param.requires_grad = False
 
 
 def main():
@@ -56,7 +84,8 @@ def main():
         model = LightCNN_29Layers(num_classes=79077)
         model = torch.nn.DataParallel(model)
         model.load_state_dict(torch.load('/workspace/fairDL/models/LightCNN_29Layers_checkpoint.pth.tar')['state_dict'])
-        set_parameter_requires_grad(model, feature_extracting=True, num_layers=5)
+        #model.module.fc2 = torch.nn.Linear(256, args.num_classes)
+        set_parameter_requires_grad(model, feature_extracting=True, num_layers=10)
         #unfreeze_all(model)
         model.module.fc2 = torch.nn.Linear(256, args.num_classes)
     elif args.model == "LightCNN_29v2":
@@ -72,10 +101,10 @@ def main():
         set_parameter_requires_grad(model, feature_extracting=True, num_layers=10)
         model.module.fc2 = torch.nn.Linear(256, args.num_classes)
     elif args.model == "VGGFace2":
-        #model = resnet50_pt(weights_path = '/workspace/MTP/face-recognition/models/resnet50_scratch_weight.pkl', num_classes=8631, include_top=True)
-        model = resnet50_scratch_dag(weights_path = '/workspace/fairDL/models/resnet50_scratch_dag.pth')
-        set_parameter_requires_grad(model, feature_extracting=True, num_layers=10)
-        #model.fc = torch.nn.Linear(2048, args.num_classes)
+        model = resnet50_scratch_dag(weights_path = '/workspace/fairDL/models/resnet50_scratch_dag.pth') # Original weights of VGGFace2
+        freeze_all(model)
+        model.conv5_3_1x1_increase.requires_grad_(True)
+        model.conv5_3_3x3.requires_grad_(True)
     elif args.model == "SiameseModel":
         backbone = LightCNN_29Layers(num_classes=79077)
         backbone = torch.nn.DataParallel(backbone)
@@ -92,38 +121,33 @@ def main():
 
 
     if args.model in ["LightCNN_29", "LightCNN_29v2", "LightCNN_9"]:
-        train_transforms = transforms.Compose([transforms.Resize(144), transforms.RandomCrop(128), transforms.RandomHorizontalFlip(), transforms.Grayscale(num_output_channels=1), transforms.ToTensor()])
-        val_transforms = transforms.Compose([transforms.Resize(144), transforms.RandomCrop(128), transforms.RandomHorizontalFlip(), transforms.Grayscale(num_output_channels=1), transforms.ToTensor()])
-        #######train_transforms = transforms.Compose([detectalign(128), transforms.RandomHorizontalFlip(), transforms.Grayscale(num_output_channels=1), transforms.ToTensor()])
-        #######val_transforms = transforms.Compose([detectalign(128), transforms.RandomHorizontalFlip(), transforms.Grayscale(num_output_channels=1), transforms.ToTensor()])
-        #report_cmc_path = '/workspace/fairDL/reports/figures/cmc_lightcnn_plot.pdf'
+        train_transforms = transforms.Compose([transforms.Resize((144,144)), transforms.RandomCrop((128,128)), transforms.RandomHorizontalFlip(), transforms.Grayscale(num_output_channels=1), transforms.ToTensor()])
+        val_transforms = transforms.Compose([transforms.Resize((144,144)), transforms.RandomCrop((128,128)), transforms.RandomHorizontalFlip(), transforms.Grayscale(num_output_channels=1), transforms.ToTensor()])
     elif args.model == "VGGFace2":
-        train_transforms = transforms.Compose([transforms.CenterCrop(512), transforms.Resize(256), transforms.RandomCrop(224), transforms.RandomGrayscale(p=0.2), transforms.RandomHorizontalFlip(), transforms.ToTensor(), transforms.Normalize((131.0912/255, 103.8827/255, 91.4953/255), (1/255, 1/255, 1/255))])
-        val_transforms = transforms.Compose([transforms.CenterCrop(512), transforms.Resize(256), transforms.CenterCrop(224), transforms.RandomHorizontalFlip(), transforms.ToTensor(), transforms.Normalize((131.0912/255, 103.8827/255, 91.4953/255), (1/255, 1/255, 1/255))])
-        #report_cmc_path = '/workspace/fairDL/reports/figures/cmc_vgg_plot.pdf'
+        train_transforms = transforms.Compose([transforms.Resize((256,256)), transforms.RandomCrop((224,224)), transforms.RandomGrayscale(p=0.2), transforms.RandomHorizontalFlip(), transforms.ToTensor(), transforms.Normalize((131.0912/255, 103.8827/255, 91.4953/255), (1/255, 1/255, 1/255))])
+        val_transforms = transforms.Compose([transforms.Resize((224,224)), transforms.ToTensor(), transforms.Normalize((131.0912/255, 103.8827/255, 91.4953/255), (1/255, 1/255, 1/255))])
     elif args.model == "ArcFace":
-        train_transforms = transforms.Compose([transforms.CenterCrop(112), transforms.RandomGrayscale(p=0.2), transforms.RandomHorizontalFlip(), transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-        val_transforms = transforms.Compose([transforms.CenterCrop(112), transforms.RandomHorizontalFlip(), transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-        #report_cmc_path = '/workspace/fairDL/reports/figures/cmc_arcface_plot.pdf'
+        train_transforms = transforms.Compose([transforms.CenterCrop((112,112)), transforms.RandomGrayscale(p=0.2), transforms.RandomHorizontalFlip(), transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+        val_transforms = transforms.Compose([transforms.CenterCrop((112,112)), transforms.RandomHorizontalFlip(), transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
     else:
         pass
-    dataset = torchvision.datasets.ImageFolder('/workspace/fairDL/data/synthface_processed/', transform=train_transforms)
     
-
-    ####train_dataset, val_dataset = train_val_split(dataset, val_size = 0.3)
-    train_dataset = dataset
-    val_dataset = torchvision.datasets.ImageFolder('/workspace/fairDL/data/synthfaceval_processed/', transform=val_transforms)
+    if args.dataset == "CMU":
+        train_dataset = torchvision.datasets.ImageFolder('/workspace/fairDL/data/MultiPie51train/', transform=train_transforms)
+        val_dataset = torchvision.datasets.ImageFolder('/workspace/fairDL/data/MultiPie51test/', transform=val_transforms)
+    elif args.dataset == "Synth":
+        train_dataset = torchvision.datasets.ImageFolder('/workspace/fairDL/data/synthface_processed/', transform=train_transforms)
+        val_dataset = torchvision.datasets.ImageFolder('/workspace/fairDL/data/synthfaceval_processed/', transform=val_transforms)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=0, pin_memory=True) # Classes may still be imbalaced during forward pass (Ref: https://github.com/adambielski/siamese-triplet) 
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, num_workers=0, pin_memory=True)
 
-    ##criterion = losses.ContrastiveLoss(pos_margin=1, neg_margin=0, distance=distances.CosineSimilarity())
-    criterion = losses.ContrastiveLoss(pos_margin=0, neg_margin=2)
-    ##optimizer = torch.optim.SGD(model.parameters(), lr = args.learning_rate, weight_decay=args.weight_decay, momentum=args.momentum)
-    optimizer = torch.optim.Adam(model.parameters(), lr = args.learning_rate, weight_decay=args.weight_decay)
+    criterion = losses.ArcFaceLoss(num_classes=2000, embedding_size=2048, margin=35, scale=64)
+    optimizer = torch.optim.SGD(model.parameters(), lr = args.learning_rate, momentum=args.momentum, weight_decay=args.weight_decay)
+    criterion_optimizer  = torch.optim.SGD(criterion.parameters(), lr = 0.01, momentum=args.momentum, weight_decay=args.weight_decay)
     lr_scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 
-    train_model(model, train_loader, val_loader, criterion, optimizer, lr_scheduler, args.epochs, args.save_path, args.arch)
+    train_model(model, train_loader, val_loader, criterion, criterion_optimizer, optimizer, lr_scheduler, args.epochs, args.save_path, args.arch)
 
 if __name__ == '__main__':
     main()

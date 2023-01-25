@@ -8,6 +8,12 @@ This work is carried out as part of my Masters Thesis - ***"Bias and Fairness in
 
 ## Requirements:
 
+Clone the repository
+> git clone https://github.com/ksasi/fairDL.git
+
+Install using pip
+
+> pip install -r requirements.txt
 
 ## Datasets:
 
